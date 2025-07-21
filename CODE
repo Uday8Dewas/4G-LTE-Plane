@@ -1,3 +1,4 @@
+// ==== BLYNK CONFIGURATION ====
 #define BLYNK_TEMPLATE_ID "TMPL3iM-O34wW"
 #define BLYNK_TEMPLATE_NAME "MAJOR PROJECT RC PLANE"
 #define BLYNK_AUTH_TOKEN "WBKIzKfAe1L5-6o4Z3p0oqFfKstouXvI"
@@ -23,13 +24,19 @@ char pass[] = "uday8dewas";
 #define VPIN_AILERON V5
 #define VPIN_GPS V6
 
-// Servo & Sensors
-Servo esc, elevator, aileron, rudder;
+// GPS and Serial
 TinyGPSPlus gps;
 HardwareSerial gpsSerial(1);
+
+// Custom I2C for BMP280
 TwoWire bmpWire(1);
 Adafruit_BMP280 bmp(&bmpWire);
+
+// MPU6050
 MPU6050 mpu;
+
+// ESP32Servo for all servos/ESC
+Servo esc, elevator, aileron, rudder;
 
 // GPIO Pins
 #define GPS_RX 16
@@ -43,146 +50,89 @@ MPU6050 mpu;
 #define AILERON_PIN 27
 #define RUDDER_PIN 14
 
-// Control Variables
-int throttleValue = 1000;
-int elevValue = 90;
-int ailValue = 90;
-int elevInput = 0;
-int ailInput = 0;
+// Flight Control Variables
+float targetAltitude = 0;
+bool firstAltitudeRead = true;
 bool rudderLeft = false, rudderRight = false;
 
-// Gyro Variables
-float pitch = 0, roll = 0;
-
-// Timing for auto/manual switch
-unsigned long lastElevatorInputTime = 0;
-unsigned long lastAileronInputTime = 0;
-const unsigned long manualTimeout = 1000; // ms
-
-// ========== BLYNK WRITE FUNCTIONS ==========
-
-BLYNK_WRITE(VPIN_THROTTLE) {
-  int input = param.asInt();
-  throttleValue = map(input, 0, 100, 1000, 2000);
-}
-
-BLYNK_WRITE(VPIN_ELEVATOR) {
-  int input = param.asInt();
-  elevInput = input;
-  elevValue = map(input, -50, 50, 60, 100);
-  lastElevatorInputTime = millis();
-}
-
-BLYNK_WRITE(VPIN_AILERON) {
-  int input = param.asInt();
-  ailInput = input;
-  ailValue = map(input, -50, 50, 65, 115);
-  lastAileronInputTime = millis();
-}
-
+// Blynk controls
 BLYNK_WRITE(VPIN_RUDDER_LEFT) {
   rudderLeft = param.asInt();
 }
-
 BLYNK_WRITE(VPIN_RUDDER_RIGHT) {
   rudderRight = param.asInt();
 }
-
-// ========== GYRO READING FUNCTION ==========
-
-void readGyro() {
-  int16_t ax, ay, az, gx, gy, gz;
-  mpu.getMotion6(&ax, &ay, &az, &gx, &gy, &gz);
-
-  pitch = atan2(ax, az) * 180 / PI;
-  roll = atan2(ay, az) * 180 / PI;
-}
-
-// ========== GPS READING AND SENDING FUNCTION ==========
-
-void sendGPS() {
-  while (gpsSerial.available() > 0) {
-    gps.encode(gpsSerial.read());
-  }
-
-  if (gps.location.isUpdated()) {
-    float latitude = gps.location.lat();
-    float longitude = gps.location.lng();
-
-    String gpsData = String(latitude, 6) + "," + String(longitude, 6);
-    Blynk.virtualWrite(VPIN_GPS, gpsData);
-
-    Serial.print("Latitude: ");
-    Serial.print(latitude, 6);
-    Serial.print(" | Longitude: ");
-    Serial.println(longitude, 6);
-  }
-}
-
-// ========== SETUP ==========
 
 void setup() {
   Serial.begin(115200);
   Blynk.begin(BLYNK_AUTH_TOKEN, ssid, pass);
 
-  // GPS
+  // GPS setup
   gpsSerial.begin(9600, SERIAL_8N1, GPS_RX, GPS_TX);
 
-  // Sensors
+  // MPU6050 setup
   Wire.begin(MPU_SDA, MPU_SCL);
   mpu.initialize();
-  bmpWire.begin(BMP_SDA, BMP_SCL);
-  bmp.begin(0x76);
+  if (!mpu.testConnection()) {
+    Serial.println("MPU6050 connection failed");
+  }
 
-  // Servo/ESC setup
+  // BMP280 setup
+  bmpWire.begin(BMP_SDA, BMP_SCL);
+  if (!bmp.begin(0x76)) {
+    Serial.println("BMP280 not found");
+  }
+
+  // Servo setup
   esc.attach(ESC_PIN);
+esc.writeMicroseconds(1000);  // Set throttle to minimum for ESC arming
+delay(2000);  // Give ESC time to arm
+
   elevator.attach(ELEVATOR_PIN);
   aileron.attach(AILERON_PIN);
   rudder.attach(RUDDER_PIN);
-
-  // ESC arming sequence
-  esc.writeMicroseconds(1000);
-  delay(100);
-  esc.writeMicroseconds(2000);
-  delay(100);
-  esc.writeMicroseconds(1000);
-  delay(100);
 }
-
-// ========== LOOP ==========
 
 void loop() {
   Blynk.run();
-  sendGPS();
-  readGyro();
 
-  // Throttle control
-  esc.writeMicroseconds(throttleValue);
-
-  // === Elevator Control ===
-  if ((millis() - lastElevatorInputTime > manualTimeout) && (abs(elevInput) < 5)) {
-    int correction = map(pitch, -20, 20, 100, 80);
-    correction = constrain(correction, 60, 100);
-    elevator.write(correction);
-  } else {
-    elevator.write(elevValue);
+  // GPS read
+  while (gpsSerial.available()) {
+    gps.encode(gpsSerial.read());
   }
 
-  // === Aileron Control ===
-  if ((millis() - lastAileronInputTime > manualTimeout) && (abs(ailInput) < 5)) {
-    int correction = map(roll, -20, 20, 105, 75);
-    correction = constrain(correction, 65, 115);
-    aileron.write(correction);
-  } else {
-    aileron.write(ailValue);
+  if (gps.location.isUpdated()) {
+    String gpsInfo = "Lat: " + String(gps.location.lat(), 6) + ", Lon: " + String(gps.location.lng(), 6);
+    Blynk.virtualWrite(VPIN_GPS, gpsInfo);
+    Serial.println(gpsInfo);
   }
 
-  // Rudder Control
+  // Read MPU6050 motion data
+  int16_t ax, ay, az, gx, gy, gz;
+  mpu.getMotion6(&ax, &ay, &az, &gx, &gy, &gz);
+
+  // Stabilize elevator and aileron based on pitch/roll
+  int elev = map(ay, -17000, 17000, 60, 120);
+  int ail = map(ax, -17000, 17000, 60, 120);
+  elevator.write(constrain(elev, 60, 120));
+  aileron.write(constrain(ail, 60, 120));
+
+  // Rudder control via Blynk
   if (rudderLeft) rudder.write(60);
   else if (rudderRight) rudder.write(120);
   else rudder.write(90);
 
-  delay(50);
+  // Altitude hold using BMP280
+  float currentAltitude = bmp.readAltitude(1013.25);
+  if (firstAltitudeRead && currentAltitude > 0) {
+    targetAltitude = currentAltitude;
+    firstAltitudeRead = false;
+  }
+
+  float altitudeError = targetAltitude - currentAltitude;
+  int throttleCorrection = map(altitudeError * 10, -100, 100, 1400, 1600);
+  throttleCorrection = constrain(throttleCorrection, 1200, 1800);
+  esc.writeMicroseconds(throttleCorrection);
+
+  delay(200);
 }
-
-
