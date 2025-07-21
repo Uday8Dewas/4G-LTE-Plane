@@ -1,0 +1,188 @@
+#define BLYNK_TEMPLATE_ID "TMPL3iM-O34wW"
+#define BLYNK_TEMPLATE_NAME "MAJOR PROJECT RC PLANE"
+#define BLYNK_AUTH_TOKEN "WBKIzKfAe1L5-6o4Z3p0oqFfKstouXvI"
+
+#include <WiFi.h>
+#include <BlynkSimpleEsp32.h>
+#include <Wire.h>
+#include <ESP32Servo.h>
+#include <Adafruit_BMP280.h>
+#include <MPU6050.h>
+#include <TinyGPS++.h>
+#include <HardwareSerial.h>
+
+// WiFi credentials
+char ssid[] = "Mini-Project";
+char pass[] = "uday8dewas";
+
+// Virtual Pins
+#define VPIN_THROTTLE V1
+#define VPIN_RUDDER_LEFT V2
+#define VPIN_RUDDER_RIGHT V3
+#define VPIN_ELEVATOR V4
+#define VPIN_AILERON V5
+#define VPIN_GPS V6
+
+// Servo & Sensors
+Servo esc, elevator, aileron, rudder;
+TinyGPSPlus gps;
+HardwareSerial gpsSerial(1);
+TwoWire bmpWire(1);
+Adafruit_BMP280 bmp(&bmpWire);
+MPU6050 mpu;
+
+// GPIO Pins
+#define GPS_RX 16
+#define GPS_TX 17
+#define MPU_SDA 21
+#define MPU_SCL 22
+#define BMP_SDA 25
+#define BMP_SCL 26
+#define ESC_PIN 32
+#define ELEVATOR_PIN 33
+#define AILERON_PIN 27
+#define RUDDER_PIN 14
+
+// Control Variables
+int throttleValue = 1000;
+int elevValue = 90;
+int ailValue = 90;
+int elevInput = 0;
+int ailInput = 0;
+bool rudderLeft = false, rudderRight = false;
+
+// Gyro Variables
+float pitch = 0, roll = 0;
+
+// Timing for auto/manual switch
+unsigned long lastElevatorInputTime = 0;
+unsigned long lastAileronInputTime = 0;
+const unsigned long manualTimeout = 1000; // ms
+
+// ========== BLYNK WRITE FUNCTIONS ==========
+
+BLYNK_WRITE(VPIN_THROTTLE) {
+  int input = param.asInt();
+  throttleValue = map(input, 0, 100, 1000, 2000);
+}
+
+BLYNK_WRITE(VPIN_ELEVATOR) {
+  int input = param.asInt();
+  elevInput = input;
+  elevValue = map(input, -50, 50, 60, 100);
+  lastElevatorInputTime = millis();
+}
+
+BLYNK_WRITE(VPIN_AILERON) {
+  int input = param.asInt();
+  ailInput = input;
+  ailValue = map(input, -50, 50, 65, 115);
+  lastAileronInputTime = millis();
+}
+
+BLYNK_WRITE(VPIN_RUDDER_LEFT) {
+  rudderLeft = param.asInt();
+}
+
+BLYNK_WRITE(VPIN_RUDDER_RIGHT) {
+  rudderRight = param.asInt();
+}
+
+// ========== GYRO READING FUNCTION ==========
+
+void readGyro() {
+  int16_t ax, ay, az, gx, gy, gz;
+  mpu.getMotion6(&ax, &ay, &az, &gx, &gy, &gz);
+
+  pitch = atan2(ax, az) * 180 / PI;
+  roll = atan2(ay, az) * 180 / PI;
+}
+
+// ========== GPS READING AND SENDING FUNCTION ==========
+
+void sendGPS() {
+  while (gpsSerial.available() > 0) {
+    gps.encode(gpsSerial.read());
+  }
+
+  if (gps.location.isUpdated()) {
+    float latitude = gps.location.lat();
+    float longitude = gps.location.lng();
+
+    String gpsData = String(latitude, 6) + "," + String(longitude, 6);
+    Blynk.virtualWrite(VPIN_GPS, gpsData);
+
+    Serial.print("Latitude: ");
+    Serial.print(latitude, 6);
+    Serial.print(" | Longitude: ");
+    Serial.println(longitude, 6);
+  }
+}
+
+// ========== SETUP ==========
+
+void setup() {
+  Serial.begin(115200);
+  Blynk.begin(BLYNK_AUTH_TOKEN, ssid, pass);
+
+  // GPS
+  gpsSerial.begin(9600, SERIAL_8N1, GPS_RX, GPS_TX);
+
+  // Sensors
+  Wire.begin(MPU_SDA, MPU_SCL);
+  mpu.initialize();
+  bmpWire.begin(BMP_SDA, BMP_SCL);
+  bmp.begin(0x76);
+
+  // Servo/ESC setup
+  esc.attach(ESC_PIN);
+  elevator.attach(ELEVATOR_PIN);
+  aileron.attach(AILERON_PIN);
+  rudder.attach(RUDDER_PIN);
+
+  // ESC arming sequence
+  esc.writeMicroseconds(1000);
+  delay(100);
+  esc.writeMicroseconds(2000);
+  delay(100);
+  esc.writeMicroseconds(1000);
+  delay(100);
+}
+
+// ========== LOOP ==========
+
+void loop() {
+  Blynk.run();
+  sendGPS();
+  readGyro();
+
+  // Throttle control
+  esc.writeMicroseconds(throttleValue);
+
+  // === Elevator Control ===
+  if ((millis() - lastElevatorInputTime > manualTimeout) && (abs(elevInput) < 5)) {
+    int correction = map(pitch, -20, 20, 100, 80);
+    correction = constrain(correction, 60, 100);
+    elevator.write(correction);
+  } else {
+    elevator.write(elevValue);
+  }
+
+  // === Aileron Control ===
+  if ((millis() - lastAileronInputTime > manualTimeout) && (abs(ailInput) < 5)) {
+    int correction = map(roll, -20, 20, 105, 75);
+    correction = constrain(correction, 65, 115);
+    aileron.write(correction);
+  } else {
+    aileron.write(ailValue);
+  }
+
+  // Rudder Control
+  if (rudderLeft) rudder.write(60);
+  else if (rudderRight) rudder.write(120);
+  else rudder.write(90);
+
+  delay(50);
+}
+
+
